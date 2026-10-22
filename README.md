@@ -1,24 +1,37 @@
 # Solar meter collector + dashboard
 
-GitHub Actions (cron, every 2 h) → `collector/collect.py` → Supabase (Postgres) → static dashboard on GitHub Pages.
+Your PC (`collector/local.py`) → Supabase (Postgres) → static dashboard on GitHub Pages.
 
-The portal only refreshes the real-time read once per 6 h; running every 2 h is harmless
-(rows are keyed by the meter's own timestamp, so repeats are ignored).
+The portal login is protected by reCAPTCHA, which rejects automated logins from GitHub's servers.
+So you log in by hand in a browser window, and the script keeps that session alive and
+collects data every 2 h. The portal only refreshes the real-time read once per 6 h;
+rows are keyed by the meter's own timestamp, so repeats are ignored.
 
-## Setup
+## One-time setup
 
-1. **Supabase**: create a free project, open *SQL editor*, run `supabase/schema.sql`.
-   Note *Project URL*, the `anon` key and the `service_role` key (Project settings → API).
-2. **GitHub**: push this folder to a repo. *Settings → Secrets and variables → Actions*:
-   `PORTAL_USER`, `PORTAL_PASS` (portal login), `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`.
-   - If the headless login is rejected, use `PORTAL_COOKIE` instead (a `Cookie:` header copied
-     from a logged-in browser). It only lasts as long as the portal session, so it needs refreshing.
-3. Run *Actions → collect-meter-data → Run workflow* once and check the log.
-4. Put the Project URL and **anon** key in `dashboard/config.js`, push, then
-   *Settings → Pages → Source: GitHub Actions*. Dashboard goes live at `https://<user>.github.io/<repo>/`.
+1. **Supabase**: create a free project, run `supabase/schema.sql` in the SQL editor.
+2. **`.env`** in the project root (never commit it):
+   ```
+   SUPABASE_URL=https://xxxx.supabase.co
+   SUPABASE_SERVICE_KEY=your-service-role-key
+   ```
+3. **Python packages** (once):
+   ```
+   pip install playwright
+   playwright install chromium
+   ```
+4. **Test**: `python collector/local.py --once` - a browser opens, log in, wait; it prints
+   `upserted … row(s)`. Check the tables in Supabase.
+5. **Run all the time**: `python collector/local.py`, or make it start with Windows:
+   `schtasks /Create /SC ONLOGON /TN MeterCollector /TR "cmd /c cd /d <project folder> && python collector\local.py"`
+   When the session expires, the login window opens again; log in and it carries on.
+
+## Dashboard
+Put the Project URL and **anon** key in `dashboard/config.js`, push, then
+*Settings → Pages → Source: GitHub Actions*. It goes live at `https://<user>.github.io/<repo>/`.
 
 ## Notes
 - The anon key is public and read-only; anyone with the dashboard URL can read your meter data.
-  Keep the repo/URL private-ish, or add Supabase Auth later.
-- Never commit the `service_role` key or portal password.
-- Free GitHub scheduled workflows are paused after 60 days without repo activity.
+- Never commit the `service_role` key, `.env` or `.session`.
+- The GitHub workflow `collect-meter-data` is manual-only and will fail on login; it is kept
+  only for the `PORTAL_COOKIE` option.

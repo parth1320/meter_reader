@@ -1,8 +1,8 @@
 name: collect-meter-data
 
 on:
-  schedule:
-    - cron: "7 */2 * * *"   # every 2 hours (the portal allows a fresh real-time read every 6h)
+  # Scheduled runs are off: the portal's reCAPTCHA rejects the headless login from GitHub's servers
+  # ("Invalid Captcha"). Collection runs on your PC instead (collector/local.py).
   workflow_dispatch:
 
 concurrency: collect

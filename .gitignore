@@ -1,2 +1,4 @@
 .env
-data/snapshots.jsonl
+.session
+__pycache__/
+login_failed.png

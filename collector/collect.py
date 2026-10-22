@@ -69,6 +69,10 @@ def get_cookie():
 
 
 # ---------------------------------------------------------------- portal
+class SessionExpired(Exception):
+    pass
+
+
 class Portal:
     def __init__(self, cookie):
         self.cookie = cookie
@@ -79,7 +83,7 @@ class Portal:
         try:
             return urllib.request.urlopen(req, timeout=60).read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            sys.exit(f"HTTP {e.code} from portal (session expired?)")
+            raise SessionExpired(f"HTTP {e.code} from portal (session expired?)")
 
     def init(self):
         req = urllib.request.Request(BASE + "usages.aspx", headers={"Cookie": self.cookie, "User-Agent": UA})
@@ -91,7 +95,7 @@ class Portal:
 
         self.csrf, self.meter = hidden("hdnCSRFToken"), hidden("hdnMeterValue")
         if not (self.csrf and self.meter):
-            sys.exit("Not logged in (no CSRF token / meter number on the usage page).")
+            raise SessionExpired("Not logged in (no CSRF token / meter number on the usage page).")
 
     def call(self, page, method, payload):
         req = urllib.request.Request(
@@ -186,11 +190,9 @@ def upsert(table, rows, key):
     log(f"upserted {len(rows)} row(s) into {table}")
 
 
-def main():
-    for v in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY"):
-        if not os.environ.get(v):
-            sys.exit(f"Missing env {v}")
-    portal = Portal(get_cookie())
+def collect_once(cookie):
+    """Fetch everything and upsert into Supabase. Raises SessionExpired if not logged in."""
+    portal = Portal(cookie)
     portal.init()
     log("meter", portal.meter)
 
@@ -199,6 +201,16 @@ def main():
         upsert("realtime_reads", [rt], "meter_time")
     upsert("monthly_usage", fetch_monthly(portal), "month")
     upsert("bills", fetch_bills(portal), "month")
+
+
+def main():
+    for v in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY"):
+        if not os.environ.get(v):
+            sys.exit(f"Missing env {v}")
+    try:
+        collect_once(get_cookie())
+    except SessionExpired as e:
+        sys.exit(str(e))
 
 
 if __name__ == "__main__":
