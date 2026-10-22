@@ -13,7 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from html import unescape
 
 BASE = "https://dgvclsmartmeter.dgvclinfra.in/portal/"
@@ -22,7 +22,7 @@ IST = "+05:30"
 
 
 def log(*a):
-    print(datetime.utcnow().strftime("%H:%M:%S"), *a, flush=True)
+    print(datetime.now(timezone.utc).strftime("%H:%M:%S"), *a, flush=True)
 
 
 # ---------------------------------------------------------------- auth
@@ -37,6 +37,14 @@ def login_with_browser(user, password):
         page.fill("#txtLogin", user)
         page.fill("input[type=password]", password)
         page.click("#btnlogin")
+        page.wait_for_timeout(6000)
+        # Surface whatever the portal tells the user (toast / inline error) to diagnose failures.
+        msgs = page.evaluate(
+            """() => [...document.querySelectorAll('.toast-message, .toast-error, .error_messagecommon, '
+                + '[class*=error], [role=alert]')].map(e => e.innerText.trim()).filter(Boolean)""")
+        if msgs and "Dashboard" not in page.url:
+            log("portal message after login click:", " | ".join(dict.fromkeys(msgs))[:300])
+        log("page url after click:", page.url)
         try:
             page.wait_for_url(re.compile(r"Dashboard\.aspx", re.I), timeout=45000)
         except Exception:
