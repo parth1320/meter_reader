@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solar Meter Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="config.js"></script>
+<style>
+  :root { --bg:#f4f6fa; --card:#fff; --text:#1b2433; --muted:#6b778c; --line:#e3e8f0;
+          --blue:#2563eb; --amber:#d97706; --green:#16a34a; --red:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1420; --card:#171f2e; --text:#e8edf6; --muted:#8b97ad; --line:#26324a;
+            --blue:#60a5fa; --amber:#fbbf24; --green:#4ade80; --red:#f87171; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:1150px; margin:0 auto; padding:24px 16px 48px; }
+  header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; margin-bottom:18px; }
+  h1 { font-size:22px; margin:0; }
+  .sub { color:var(--muted); font-size:13px; }
+  .range button { background:var(--card); color:var(--text); border:1px solid var(--line); padding:5px 12px; cursor:pointer; font:inherit; font-size:13px; }
+  .range button:first-child { border-radius:8px 0 0 8px; } .range button:last-child { border-radius:0 8px 8px 0; }
+  .range button.on { background:var(--blue); border-color:var(--blue); color:#fff; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .label { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .value { font-size:26px; font-weight:650; margin-top:2px; }
+  .unit { font-size:13px; color:var(--muted); font-weight:400; }
+  .note { color:var(--muted); font-size:12px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:12px; }
+  .card { min-width:0; }
+  @media (max-width:520px){ .grid { grid-template-columns:minmax(0,1fr); } }
+  h2 { font-size:15px; margin:0 0 10px; }
+  .chart { position:relative; height:250px; }
+  #msg { display:none; padding:14px 16px; border-radius:12px; background:#fee2e2; color:#7f1d1d; margin-bottom:14px; }
+  .stale { color:var(--red); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Solar Meter Dashboard</h1><div class="sub" id="meta">loading…</div></div>
+    <div class="range" id="range">
+      <button data-d="1">24h</button><button data-d="7" class="on">7d</button><button data-d="30">30d</button><button data-d="0">All</button>
+    </div>
+  </header>
+  <div id="msg"></div>
+  <section class="kpis" id="kpis"></section>
+  <section class="grid">
+    <div class="card"><h2>Active power (kW)</h2><div class="chart"><canvas id="cPower"></canvas></div></div>
+    <div class="card"><h2>Energy per interval (kWh): imported vs exported</h2><div class="chart"><canvas id="cEnergy"></canvas></div></div>
+    <div class="card"><h2>Voltage (V) &amp; current (A)</h2><div class="chart"><canvas id="cVI"></canvas></div></div>
+    <div class="card"><h2>Cumulative meter registers (kWh)</h2><div class="chart"><canvas id="cCum"></canvas></div></div>
+    <div class="card"><h2>Monthly consumption (kWh)</h2><div class="chart"><canvas id="cMonth"></canvas></div></div>
+    <div class="card"><h2>Bills (₹)</h2><div class="chart"><canvas id="cBill"></canvas></div></div>
+  </section>
+</main>
+<script>
+const C = window.CONFIG || {};
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = (n, d = 0) => n == null ? '–' : Number(n).toLocaleString('en-IN', { maximumFractionDigits: d });
+const tz = { timeZone: 'Asia/Kolkata' };
+const fdt = t => new Date(t).toLocaleString('en-GB', { ...tz, day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+const fmon = d => new Date(d).toLocaleString('en', { month: 'short', year: '2-digit', timeZone: 'UTC' });
+let reads = [], months = [], bills = [], days = 7, charts = {};
+
+async function q(table, query) {
+  const r = await fetch(`${C.SUPABASE_URL}/rest/v1/${table}?${query}`, {
+    headers: { apikey: C.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + C.SUPABASE_ANON_KEY } });
+  if (!r.ok) throw new Error(`${table}: HTTP ${r.status}`);
+  return r.json();
+}
+
+async function load() {
+  if (!C.SUPABASE_URL || C.SUPABASE_URL.includes('YOUR-PROJECT')) {
+    $('msg').style.display = 'block';
+    $('msg').textContent = 'Set SUPABASE_URL and SUPABASE_ANON_KEY in dashboard/config.js';
+    $('meta').textContent = 'not configured'; return;
+  }
+  try {
+    [reads, months, bills] = await Promise.all([
+      q('realtime_reads', 'select=*&order=meter_time.asc&limit=5000'),
+      q('monthly_usage', 'select=*&order=month.asc'),
+      q('bills', 'select=*&order=month.asc')]);
+  } catch (e) { $('msg').style.display = 'block'; $('msg').textContent = 'Could not load data: ' + e.message; return; }
+  render();
+}
+
+function draw(id, type, labels, datasets, opts = {}) {
+  charts[id]?.destroy();
+  const tick = { color: css('--muted') }, grid = { color: css('--line') };
+  charts[id] = new Chart($(id), { type, data: { labels, datasets }, options: {
+    responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+    plugins: { legend: { display: datasets.length > 1, labels: { color: css('--muted'), boxWidth: 12 } } },
+    scales: { x: { grid: { display: false }, ticks: { ...tick, maxTicksLimit: 7 } },
+              y: { grid, ticks: tick, ...(opts.y || {}) }, ...(opts.scales || {}) } } });
+}
+
+function render() {
+  const cutoff = days ? Date.now() - days * 864e5 : 0;
+  const all = reads, r = all.filter(x => new Date(x.meter_time) >= cutoff);
+  const last = all[all.length - 1], prev = all[all.length - 2];
+
+  $('meta').innerHTML = last
+    ? `Meter ${last.meter} · last reading ${fdt(last.meter_time)} IST · ${all.length} readings stored`
+    : 'No readings yet';
+  const ageH = last ? (Date.now() - new Date(last.meter_time)) / 36e5 : null;
+  if (ageH > 12) $('meta').innerHTML += ` · <span class="stale">stale (${fmt(ageH)} h old)</span>`;
+
+  const kpi = (l, v, u, n = '') => `<div class="card"><div class="label">${l}</div><div class="value">${v} <span class="unit">${u}</span></div><div class="note">${n}</div></div>`;
+  const dImp = last && prev ? last.import_kwh - prev.import_kwh : null;
+  const dExp = last && prev ? last.export_kwh - prev.export_kwh : null;
+  const net = last ? last.export_kwh - last.import_kwh : null;
+  $('kpis').innerHTML = last ? [
+    kpi('Active power', fmt(last.active_power_kw, 2), 'kW', `${fmt(last.apparent_power_kva, 2)} kVA`),
+    kpi('Voltage', fmt(last.voltage_v, 1), 'V', `${fmt(last.frequency_hz, 1)} Hz`),
+    kpi('Current', fmt(last.current_a, 1), 'A', `PF ${fmt(last.power_factor, 2)}`),
+    kpi('Imported (total)', fmt(last.import_kwh, 1), 'kWh', dImp != null ? `+${fmt(dImp, 1)} since previous read` : ''),
+    kpi('Exported (total)', fmt(last.export_kwh, 1), 'kWh', dExp != null ? `+${fmt(dExp, 1)} since previous read` : ''),
+    kpi('Net (export − import)', (net >= 0 ? '+' : '') + fmt(net, 1), 'kWh', net >= 0 ? 'net exporter' : 'net importer'),
+    kpi('Max demand', fmt(last.md_kw, 2), 'kW', last.md_time ? fdt(last.md_time) : ''),
+  ].join('') : '';
+
+  const L = r.map(x => fdt(x.meter_time));
+  draw('cPower', 'line', L, [{ label: 'kW', data: r.map(x => x.active_power_kw), borderColor: css('--amber'), backgroundColor: css('--amber'), tension: .25, pointRadius: 2 }], { y: { beginAtZero: true } });
+  draw('cVI', 'line', L, [
+    { label: 'Voltage (V)', data: r.map(x => x.voltage_v), borderColor: css('--blue'), yAxisID: 'y', tension: .25, pointRadius: 2 },
+    { label: 'Current (A)', data: r.map(x => x.current_a), borderColor: css('--green'), yAxisID: 'y1', tension: .25, pointRadius: 2 }],
+    { scales: { y1: { position: 'right', grid: { display: false }, ticks: { color: css('--muted') } } } });
+  draw('cCum', 'line', L, [
+    { label: 'Import', data: r.map(x => x.import_kwh), borderColor: css('--red'), pointRadius: 0 },
+    { label: 'Export', data: r.map(x => x.export_kwh), borderColor: css('--green'), pointRadius: 0 }]);
+
+  // energy per interval = difference between consecutive cumulative reads
+  const idx0 = all.indexOf(r[0]);
+  const iv = r.map((x, i) => { const p = all[idx0 + i - 1]; return p ? { t: x.meter_time, i: x.import_kwh - p.import_kwh, e: x.export_kwh - p.export_kwh } : null; }).filter(Boolean);
+  draw('cEnergy', 'bar', iv.map(x => fdt(x.t)), [
+    { label: 'Imported', data: iv.map(x => x.i), backgroundColor: css('--red') },
+    { label: 'Exported', data: iv.map(x => x.e), backgroundColor: css('--green') }], { y: { beginAtZero: true } });
+
+  draw('cMonth', 'bar', months.map(m => fmon(m.month)), [{ label: 'kWh', data: months.map(m => m.kwh), backgroundColor: css('--blue'), borderRadius: 6 }], { y: { beginAtZero: true } });
+  draw('cBill', 'bar', bills.map(b => fmon(b.month)), [{ label: '₹', data: bills.map(b => b.amount), backgroundColor: css('--green'), borderRadius: 6 }], { y: { beginAtZero: true } });
+}
+
+$('range').addEventListener('click', e => {
+  if (!e.target.dataset.d) return;
+  days = +e.target.dataset.d;
+  [...$('range').children].forEach(b => b.classList.toggle('on', b === e.target));
+  render();
+});
+load();
+</script>
+</body>
+</html>
