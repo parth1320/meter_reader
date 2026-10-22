@@ -2,3 +2,4 @@
 .session
 __pycache__/
 login_failed.png
+debug_page.html

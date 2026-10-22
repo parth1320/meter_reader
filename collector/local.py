@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 import collect
-from collect import BASE, UA, Portal, SessionExpired, log
+from collect import BASE, Portal, SessionExpired, log
 
 ROOT = Path(__file__).resolve().parent.parent
 SESSION_FILE = ROOT / ".session"
@@ -51,12 +51,14 @@ def manual_login():
         browser = p.chromium.launch(headless=False)
         ctx = browser.new_context()
         page = ctx.new_page()
+        ua = page.evaluate("navigator.userAgent")
         page.goto(BASE)
         page.wait_for_url(re.compile(r"Dashboard\.aspx", re.I), timeout=LOGIN_TIMEOUT_S * 1000)
         page.wait_for_timeout(2000)
         cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
         browser.close()
-    SESSION_FILE.write_text(cookie, encoding="utf-8")
+    SESSION_FILE.write_text(json.dumps({"cookie": cookie, "ua": ua}), encoding="utf-8")
+    collect.UA = ua  # the portal may tie the session to the browser identity
     log("Login captured.")
     return cookie
 
@@ -68,7 +70,7 @@ def keep_alive(cookie):
     for page, method in (("default.aspx", "ExtendSession"), ("Common.aspx", "GetrefreshedTokenJWT")):
         req = urllib.request.Request(
             f"{BASE}{page}/{method}", data=b"{}", method="POST",
-            headers={"Cookie": cookie, "User-Agent": UA, "csrftoken": portal.csrf,
+            headers={"Cookie": cookie, "User-Agent": collect.UA, "csrftoken": portal.csrf,
                      "Content-Type": "application/json; charset=utf-8"})
         try:
             portal._open(req)
@@ -84,14 +86,23 @@ def main():
     args = ap.parse_args()
     load_env()
 
-    cookie = SESSION_FILE.read_text(encoding="utf-8") if SESSION_FILE.exists() else None
+    cookie = None
+    if SESSION_FILE.exists():
+        try:
+            saved = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+            cookie, collect.UA = saved["cookie"], saved["ua"]
+        except Exception:
+            SESSION_FILE.unlink(missing_ok=True)
     next_collect = 0.0
+    fresh = False
     while True:
         try:
             if not cookie:
                 cookie = manual_login()
+                fresh = True
             if time.time() >= next_collect:
                 collect.collect_once(cookie)
+                fresh = False
                 next_collect = time.time() + COLLECT_EVERY_H * 3600
                 if args.once:
                     return
@@ -100,6 +111,9 @@ def main():
                 log("session kept alive")
         except SessionExpired as e:
             log("Session expired:", e)
+            if fresh:
+                sys.exit("The session was rejected right after a fresh login, so retrying won't help. "
+                         "Send the 'debug:' line above to get it fixed (debug_page.html was saved).")
             cookie = None
             SESSION_FILE.unlink(missing_ok=True)
             continue  # reopen the login window immediately

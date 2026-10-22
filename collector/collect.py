@@ -78,10 +78,13 @@ class Portal:
         self.cookie = cookie
         self.csrf = None
         self.meter = None
+        self.last_url = None
 
     def _open(self, req):
         try:
-            return urllib.request.urlopen(req, timeout=60).read().decode("utf-8", "replace")
+            resp = urllib.request.urlopen(req, timeout=60)
+            self.last_url = resp.geturl()
+            return resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
             raise SessionExpired(f"HTTP {e.code} from portal (session expired?)")
 
@@ -93,8 +96,31 @@ class Portal:
             m = re.search(r'id="%s"[^>]*value="([^"]*)"' % id_, html)
             return unescape(m.group(1)) if m else None
 
-        self.csrf, self.meter = hidden("hdnCSRFToken"), hidden("hdnMeterValue")
+        self.csrf = hidden("hdnCSRFToken")
+        # The page fills the meter number in with JavaScript, so ask the same endpoint it uses.
+        self.meter = os.environ.get("METER_NUMBER") or hidden("hdnMeterValue")
+        if self.csrf and not self.meter:
+            for mtype in ("S", "E", "P"):
+                try:
+                    meters = self.call("Usages.aspx", "BindMultiMeter", {"MeterType": mtype})
+                    details = (meters or {}).get("MeterDetails") or []
+                except SessionExpired:
+                    raise
+                except Exception as e:
+                    log(f"meter list type {mtype} failed:", repr(e))
+                    continue
+                if details:
+                    self.meter = details[0]["MeterNumber"]
+                    log(f"meter list type {mtype}: found {self.meter}")
+                    break
+                log(f"meter list type {mtype}: empty")
         if not (self.csrf and self.meter):
+            title = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+            log(f"debug: landed on {self.last_url} title={title.group(1).strip() if title else None!r} "
+                f"len={len(html)} csrf_found={bool(self.csrf)} meter_found={bool(self.meter)} "
+                f"cookie_names={[c.split('=')[0].strip() for c in self.cookie.split(';')]}")
+            from pathlib import Path
+            Path("debug_page.html").write_text(html, encoding="utf-8")
             raise SessionExpired("Not logged in (no CSRF token / meter number on the usage page).")
 
     def call(self, page, method, payload):
